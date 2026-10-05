@@ -69,8 +69,11 @@ from . import engine
 # Default project dir, set at startup. Tools use this when project_dir is omitted.
 DEFAULT_PROJECT_DIR = Path.cwd()
 
-# Locate the package's static files (references/, templates/)
-PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent
+# Locate package static files (references/, templates/, SKILL.md)
+# Prefer files bundled inside the installed package; fall back to repo root in dev.
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _PACKAGE_DIR.parent.parent
+PACKAGE_ROOT = _REPO_ROOT if (_REPO_ROOT / "SKILL.md").exists() else _PACKAGE_DIR
 
 # Config cache per project dir
 _config_cache: dict[str, dict[str, str]] = {}
@@ -840,10 +843,15 @@ def workflow_setup(
 # ---------------------------------------------------------------------------
 
 def _read_package_file(rel_path: str) -> str:
-    full = PACKAGE_ROOT / rel_path
-    if full.exists():
-        return full.read_text()
-    return f"File not found: {rel_path}"
+    """Read a package data file from install or editable checkout."""
+    candidates = [
+        _PACKAGE_DIR / rel_path,
+        _REPO_ROOT / rel_path,
+    ]
+    for full in candidates:
+        if full.exists():
+            return full.read_text()
+    return f"(file not found: {rel_path})"
 
 
 @mcp.resource("workflow://state")
