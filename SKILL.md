@@ -8,7 +8,7 @@ description: >
   resuming an in-progress workflow ("workflow status"), or when someone is about
   to jump straight into code without planning. Do NOT use for non-software
   projects or for work that does not need lifecycle coordination.
-license: Apache-2.0
+license: MIT
 compatibility: Requires filesystem access. MCP server or CLI for state management.
 metadata:
   version: "1.0.0"
