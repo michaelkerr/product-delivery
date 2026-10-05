@@ -1,9 +1,8 @@
+# Disabled for now — re-enable push/PR triggers when Actions minutes are available.
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
