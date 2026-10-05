@@ -1,0 +1,26 @@
+# Optional CI gate for consuming projects.
+# Installed by product-delivery setup when missing.
+name: product-delivery-check
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  workflow-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - name: Install product-delivery
+        run: uv tool install product-delivery || uv pip install --system product-delivery || true
+      - name: Workflow CI check
+        run: |
+          if [ -f .workflow/state.json ]; then
+            python -c "from product_delivery import engine; import sys, json; from pathlib import Path; r=engine.check_ci(Path('.')); print(json.dumps(r, indent=2)); sys.exit(0 if r.get('ok') else 1)"
+          else
+            echo "No .workflow/state.json — skipping"
+          fi

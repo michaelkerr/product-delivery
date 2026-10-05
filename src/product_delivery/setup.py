@@ -22,23 +22,26 @@ MCP_SERVER_CONFIG = {
 AGENTS_RULE = """\
 ## Development Workflow
 
-This project uses the **product-delivery** lifecycle. All development
-work flows through the workflow state machine.
+This project uses the **product-delivery** lifecycle. Evidence and
+transitions are **machine-checked** — not advisory.
 
 Before starting any work:
 
-1. Call `workflow_status` to check the current state.
-2. If no workflow exists, call `workflow_init` to start one.
+1. Call `workflow_detect` first. Execute its `next_actions` in order.
+2. If no workflow exists, follow the playbook (setup → init/migrate).
 3. Load the `product_delivery` prompt for full skill instructions.
 
 Rules:
 
-- Follow the workflow transitions. Do not skip states or bypass guards.
-- Use `workflow_next` to see what transitions are allowed.
-- Transition work items through the submachine:
+- Follow workflow transitions. Do not skip states or bypass guards
+  without an explicit waiver.
+- Use `workflow_next` / `workflow_check` to see what is allowed.
+- Transition work items through:
   ready → implementing → verifying → reviewing → accepted.
-- Run tests before and after each work item.
-- Record evidence for every transition.
+- Run tests before verifying and before accepting; Cursor hooks auto-
+  record pytest (and similar) runs as `test-results` evidence.
+- Record evidence (`workflow_evidence_record`) for confirmations,
+  health checks, and artifacts before advancing phases.
 - Update AGENTS.md when new patterns emerge during delivery.
 """
 
@@ -67,10 +70,35 @@ ENV_SAMPLE = """\
 GITIGNORE_LINES = [".env", ".workflow/"]
 MARKER = "product-delivery** lifecycle"
 
+HOOKS_JSON = {
+    "version": 1,
+    "hooks": {
+        "afterShellExecution": [
+            {
+                "command": ".cursor/hooks/after-shell-test.sh",
+                "matcher": "pytest|npm test|cargo test|go test|vitest|jest",
+            }
+        ],
+        "beforeMCPExecution": [
+            {
+                "command": ".cursor/hooks/before-mcp-transition.sh",
+                "failClosed": True,
+                "matcher": "workflow_transition|workflow_item_transition",
+            }
+        ],
+    },
+}
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+PACKAGE_ROOT = Path(__file__).resolve().parent
+
+
+def _templates_dir() -> Path:
+    bundled = PACKAGE_ROOT / "templates" / "repo-setup"
+    if bundled.exists():
+        return bundled
+    # Dev checkout fallback (repo root / templates / repo-setup)
+    return PACKAGE_ROOT.parent.parent / "templates" / "repo-setup"
+
 
 def _read_json(path: Path) -> dict:
     if path.exists():
@@ -87,7 +115,7 @@ def _write_json(path: Path, data: dict):
 
 
 # ---------------------------------------------------------------------------
-# Setup steps — each returns a dict describing what it did/would do
+# Setup steps
 # ---------------------------------------------------------------------------
 
 def _check_mcp_config(project: Path, subdir: str, filename: str) -> dict:
@@ -185,21 +213,84 @@ def _apply_gitignore(project: Path):
             f.write("\n".join(missing) + "\n")
 
 
+def _check_hooks(project: Path) -> dict:
+    hooks_json = project / ".cursor" / "hooks.json"
+    hook_a = project / ".cursor" / "hooks" / "after-shell-test.sh"
+    hook_b = project / ".cursor" / "hooks" / "before-mcp-transition.sh"
+    if hooks_json.exists() and hook_a.exists() and hook_b.exists():
+        return {"file": ".cursor/hooks", "action": "skip",
+                "detail": "hooks already present"}
+    action = "update" if hooks_json.exists() else "create"
+    return {"file": ".cursor/hooks", "action": action,
+            "detail": "install afterShell + beforeMCP enforcement hooks"}
+
+
+def _apply_hooks(project: Path):
+    hooks_dir = project / ".cursor" / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    hooks_path = project / ".cursor" / "hooks.json"
+    existing = _read_json(hooks_path)
+    if not existing:
+        existing = {"version": 1, "hooks": {}}
+    existing.setdefault("version", 1)
+    existing.setdefault("hooks", {})
+
+    # Merge without clobbering unrelated hooks
+    for event, entries in HOOKS_JSON["hooks"].items():
+        current = existing["hooks"].setdefault(event, [])
+        for entry in entries:
+            cmd = entry["command"]
+            if not any(e.get("command") == cmd for e in current):
+                current.append(dict(entry))
+
+    _write_json(hooks_path, existing)
+
+    tmpl = _templates_dir() / "cursor" / "hooks"
+    for name in ("after-shell-test.sh", "before-mcp-transition.sh"):
+        src = tmpl / name
+        dest = hooks_dir / name
+        if src.exists():
+            dest.write_text(src.read_text())
+        try:
+            dest.chmod(dest.stat().st_mode | 0o111)
+        except OSError:
+            pass
+
+
+def _check_ci_workflow(project: Path) -> dict:
+    path = project / ".github" / "workflows" / "product-delivery-check.yml"
+    if path.exists():
+        return {"file": ".github/workflows/product-delivery-check.yml",
+                "action": "skip", "detail": "already present"}
+    return {"file": ".github/workflows/product-delivery-check.yml",
+            "action": "create", "detail": "consumer CI gate template"}
+
+
+def _apply_ci_workflow(project: Path):
+    tmpl = _templates_dir() / "github" / "product-delivery-check.yml"
+    dest = project / ".github" / "workflows" / "product-delivery-check.yml"
+    if dest.exists():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if tmpl.exists():
+        dest.write_text(tmpl.read_text())
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def plan_setup(project: Path) -> dict:
-    """Preview what setup would do without making changes.
-
-    Returns a structured plan the agent can present to the user.
-    """
+    """Preview what setup would do without making changes."""
     steps = []
     steps.append(_check_mcp_config(project, ".claude", "settings.json"))
     steps.append(_check_mcp_config(project, ".cursor", "mcp.json"))
     steps.append(_check_agents_md(project))
     steps.extend(_check_env(project))
     steps.append(_check_gitignore(project))
+    steps.append(_check_hooks(project))
+    steps.append(_check_ci_workflow(project))
 
     changes = [s for s in steps if s["action"] != "skip"]
     unchanged = [s for s in steps if s["action"] == "skip"]
@@ -218,10 +309,7 @@ def plan_setup(project: Path) -> dict:
 
 
 def execute_setup(project: Path) -> dict:
-    """Run setup — create/update all config files.
-
-    Returns a structured result of what was done.
-    """
+    """Run setup — create/update all config files."""
     results = []
 
     for subdir, filename in [(".claude", "settings.json"), (".cursor", "mcp.json")]:
@@ -247,6 +335,18 @@ def execute_setup(project: Path) -> dict:
         check["applied"] = True
     results.append(check)
 
+    check = _check_hooks(project)
+    if check["action"] != "skip":
+        _apply_hooks(project)
+        check["applied"] = True
+    results.append(check)
+
+    check = _check_ci_workflow(project)
+    if check["action"] != "skip":
+        _apply_ci_workflow(project)
+        check["applied"] = True
+    results.append(check)
+
     applied = [r for r in results if r.get("applied")]
     skipped = [r for r in results if r["action"] == "skip"]
 
@@ -260,7 +360,8 @@ def execute_setup(project: Path) -> dict:
         "skipped_count": len(skipped),
         "has_existing_workflow": has_workflow,
         "next_steps": (
-            ["Run workflow_init to start the delivery workflow",
+            ["Call workflow_detect and follow next_actions",
+             "Or call workflow_bootstrap to setup+init in one step",
              "Load the product_delivery prompt for skill instructions"]
             if not has_workflow else
             ["Run workflow_status to check current state",
@@ -268,10 +369,6 @@ def execute_setup(project: Path) -> dict:
         ),
     }
 
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
 
 def run_setup(project: Path):
     """CLI-friendly setup with printed output."""
@@ -299,6 +396,6 @@ def run_setup(project: Path):
         print("    1. Review .env and uncomment settings you want")
         print("    2. Commit .env.sample, .claude/, .cursor/, AGENTS.md")
         print("    3. Open the project in Claude Code or Cursor")
-        print("    4. The agent will see the MCP server and follow the workflow")
+        print("    4. Agent: call workflow_detect (or workflow_bootstrap)")
 
     print()

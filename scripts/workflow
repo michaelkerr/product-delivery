@@ -159,14 +159,23 @@ def cmd_item(args):
                     print(f"  {item['id']}: {item['name']} [{item['state']}] AC: {ac or 'none'}")
 
         elif subcmd == "transition":
-            result = engine.transition_item(
-                PROJECT_DIR, args.item_id, args.target,
-                reason=getattr(args, "reason", None),
-            )
+            try:
+                result = engine.transition_item(
+                    PROJECT_DIR, args.item_id, args.target,
+                    reason=getattr(args, "reason", None),
+                    force=getattr(args, "force", False),
+                )
+            except engine.GuardFailedError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                for name, status in e.guard_results.items():
+                    print(f"  {name}: {status}", file=sys.stderr)
+                sys.exit(1)
             if result.get("idempotent"):
                 print(f"Item transition {result['transition']} already recorded.")
             else:
                 print(f"{result['item_id']}: {result['transition']} (revision {result['revision']})")
+                if result.get("forced"):
+                    print("  (forced past failed guards)")
 
         elif subcmd == "waive":
             result = engine.waive_item(PROJECT_DIR, args.item_id, args.approver, args.reason)
@@ -181,6 +190,14 @@ def cmd_item(args):
 
 def cmd_check(args):
     try:
+        if getattr(args, "ci", False):
+            result = engine.check_ci(PROJECT_DIR)
+            if getattr(args, "json", False):
+                print(json.dumps(result, indent=2))
+            else:
+                print(result.get("message", json.dumps(result)))
+            sys.exit(0 if result.get("ok") else 1)
+
         result = engine.check_guards(PROJECT_DIR)
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
@@ -199,6 +216,36 @@ def cmd_check(args):
             for name, guard_status in info["guards"].items():
                 marker = "✓" if guard_status in ("pass", "waived", "not_applicable") else "✗"
                 print(f"  {marker} {name}: {guard_status}")
+    except engine.WorkflowError as e:
+        _handle_error(e)
+
+
+def cmd_evidence(args):
+    sub = args.evidence_subcmd
+    try:
+        if sub == "add":
+            result = engine.record_evidence(
+                PROJECT_DIR,
+                args.type,
+                content=getattr(args, "content", None),
+                path=getattr(args, "path", None),
+                item_id=getattr(args, "item", None),
+            )
+            print(f"Recorded {result['key']} ({result['type']})")
+        elif sub == "test":
+            result = engine.run_and_record_tests(
+                PROJECT_DIR,
+                args.command,
+                item_id=getattr(args, "item", None),
+            )
+            print(
+                f"Recorded {result['key']} exit_code={result.get('exit_code')} "
+                f"passed={result.get('passed')} failed={result.get('failed')}"
+            )
+            sys.exit(result.get("exit_code", 0))
+        else:
+            print(f"Error: Unknown evidence subcommand: {sub}", file=sys.stderr)
+            sys.exit(2)
     except engine.WorkflowError as e:
         _handle_error(e)
 
@@ -283,6 +330,7 @@ def build_parser():
     p_item_trans.add_argument("item_id", help="Work item ID (WI-NNN)")
     p_item_trans.add_argument("target", help="Target state")
     p_item_trans.add_argument("--reason", help="Reason for transition")
+    p_item_trans.add_argument("--force", action="store_true", help="Force past failed guards")
 
     p_item_waive = item_sub.add_parser("waive", help="Waive a work item in review")
     p_item_waive.add_argument("item_id", help="Work item ID (WI-NNN)")
@@ -291,6 +339,18 @@ def build_parser():
 
     p_check = sub.add_parser("check", help="Validate guards")
     p_check.add_argument("--json", action="store_true", help="Output as JSON")
+    p_check.add_argument("--ci", action="store_true", help="CI merge gate (exit 1 on fail)")
+
+    p_ev = sub.add_parser("evidence", help="Record evidence")
+    ev_sub = p_ev.add_subparsers(dest="evidence_subcmd")
+    p_ev_add = ev_sub.add_parser("add", help="Record evidence entry")
+    p_ev_add.add_argument("--type", required=True, help="Evidence type")
+    p_ev_add.add_argument("--content", help="Inline content")
+    p_ev_add.add_argument("--path", help="Path to file")
+    p_ev_add.add_argument("--item", help="WI-NNN to link")
+    p_ev_test = ev_sub.add_parser("test", help="Run tests and record results")
+    p_ev_test.add_argument("command", nargs="?", default="pytest", help="Test command")
+    p_ev_test.add_argument("--item", help="WI-NNN to link")
 
     sub.add_parser("render", help="Human-readable status summary")
 
@@ -328,6 +388,7 @@ def main():
         "transition": cmd_transition,
         "item": cmd_item,
         "check": cmd_check,
+        "evidence": cmd_evidence,
         "render": cmd_render,
         "block": cmd_block,
         "resume": cmd_resume,

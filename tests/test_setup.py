@@ -66,7 +66,16 @@ class TestExecuteSetup:
         setup.execute_setup(project)
         content = (project / "AGENTS.md").read_text()
         assert "product-delivery" in content
-        assert "workflow_status" in content
+        assert "workflow_detect" in content
+
+    def test_installs_hooks(self, project):
+        setup.execute_setup(project)
+        assert (project / ".cursor" / "hooks.json").exists()
+        assert (project / ".cursor" / "hooks" / "after-shell-test.sh").exists()
+        assert (project / ".cursor" / "hooks" / "before-mcp-transition.sh").exists()
+        hooks = json.loads((project / ".cursor" / "hooks.json").read_text())
+        assert "afterShellExecution" in hooks["hooks"]
+        assert "beforeMCPExecution" in hooks["hooks"]
 
     def test_agents_md_append_existing(self, project):
         (project / "AGENTS.md").write_text("# My Project\n\nExisting content.\n")

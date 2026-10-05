@@ -23,26 +23,48 @@ from pathlib import Path
 
 try:
     from mcp.server.fastmcp import FastMCP as MCPServer
-except (ImportError, ModuleNotFoundError):
-    from mcp.server.mcpserver import MCPServer
+except (ImportError, ModuleNotFoundError, TypeError):
+    try:
+        from mcp.server.mcpserver import MCPServer
+    except (ImportError, ModuleNotFoundError):
+        from mcp.server.fastmcp import FastMCP as MCPServer
+
+# mcp 1.x accepts version=; mcp 2.x MCPServer may not
+try:
+    mcp = MCPServer(
+        "product-delivery",
+        version="1.0.0",
+        instructions=(
+            "Unified lifecycle server for software products. Manages a "
+            "hierarchical state machine from intake through delivery and "
+            "stabilization, with a nested work-item submachine. "
+            "FIRST STEP: always call workflow_detect — it returns a typed path "
+            "and ordered next_actions. Execute those actions in order "
+            "(setup → init/migrate → status). Do not skip setup on a bare repo. "
+            "Evidence is machine-checked: record test runs and artifacts before "
+            "advancing work items or phases. "
+            "All tools accept an optional project_dir. "
+            "Read the product_delivery prompt for full skill instructions."
+        ),
+    )
+except TypeError:
+    mcp = MCPServer(
+        "product-delivery",
+        instructions=(
+            "Unified lifecycle server for software products. Manages a "
+            "hierarchical state machine from intake through delivery and "
+            "stabilization, with a nested work-item submachine. "
+            "FIRST STEP: always call workflow_detect — it returns a typed path "
+            "and ordered next_actions. Execute those actions in order "
+            "(setup → init/migrate → status). Do not skip setup on a bare repo. "
+            "Evidence is machine-checked: record test runs and artifacts before "
+            "advancing work items or phases. "
+            "All tools accept an optional project_dir. "
+            "Read the product_delivery prompt for full skill instructions."
+        ),
+    )
 
 from . import engine
-
-mcp = MCPServer(
-    "product-delivery",
-    version="1.0.0",
-    instructions=(
-        "Unified lifecycle server for software products. Manages a "
-        "hierarchical state machine from intake through delivery and "
-        "stabilization, with a nested work-item submachine. "
-        "FIRST STEP: call workflow_detect to check the project state — "
-        "it tells you whether to run setup, init, or resume. "
-        "All tools accept an optional project_dir to target a specific "
-        "project (defaults to the working directory). "
-        "Use workflow_projects to see all registered projects across directories. "
-        "Read the product-delivery prompt for full skill instructions."
-    ),
-)
 
 # Default project dir, set at startup. Tools use this when project_dir is omitted.
 DEFAULT_PROJECT_DIR = Path.cwd()
@@ -68,12 +90,19 @@ def _load_registry() -> dict:
 
 
 def _save_registry(registry: dict):
-    REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
-    REGISTRY_PATH.write_text(json.dumps(registry, indent=2) + "\n")
+    try:
+        REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+        REGISTRY_PATH.write_text(json.dumps(registry, indent=2) + "\n")
+    except OSError:
+        # Best-effort — tests / restricted environments may block home writes
+        pass
 
 
 def _register_project(project_dir: Path, phase: str | None = None):
-    registry = _load_registry()
+    try:
+        registry = _load_registry()
+    except OSError:
+        return
     key = str(project_dir)
     now = datetime.now(timezone.utc).isoformat()
     if key in registry["projects"]:
@@ -138,84 +167,137 @@ def _error_response(e: Exception) -> str:
 
 @mcp.tool()
 def workflow_detect(project_dir: str | None = None) -> str:
-    """Detect the product-delivery state of a project.
+    """Detect project state and return an ordered next_actions playbook.
 
-    Call this FIRST when entering a project. Returns the current state
-    and what action to take next:
+    Call this FIRST when entering a project. Follow next_actions in order.
 
-    - "not_setup": No product-delivery config. Call workflow_setup to add it.
-    - "setup_no_workflow": Config exists but no workflow started. Call workflow_init.
-    - "active_workflow": Workflow in progress. Call workflow_status to see where it is.
-    - "legacy_migration": Has BUILD_PLAN.md or ROADMAP.md from old skills.
-                          Call workflow_init(from_migration=True).
+    Paths: resume | legacy_migration | established_evolution | greenfield
 
     Args:
         project_dir: Project directory to check. Defaults to working directory.
     """
+    from .classify import classify_project
+
     p = _resolve(project_dir)
+    result = classify_project(p)
+    phase = None
 
-    has_workflow = (p / ".workflow" / "state.json").exists()
-    has_agents_rule = False
-    if (p / "AGENTS.md").exists():
-        has_agents_rule = "product-delivery" in (p / "AGENTS.md").read_text()
-    has_mcp_config = any(
-        "product-delivery" in _read_json_safe(p / sub / f).get("mcpServers", {})
-        for sub, f in [(".claude", "settings.json"), (".cursor", "mcp.json")]
-    )
-    has_build_plan = (p / "BUILD_PLAN.md").exists()
-    has_roadmap = (p / "ROADMAP.md").exists()
-    has_env = (p / ".env").exists()
-
-    if has_workflow:
+    if result["path"] == "resume":
         try:
             status = engine.get_status(p)
-            state = "active_workflow"
             phase = status.get("phase", "unknown")
-            action = f"Workflow is in '{phase}' phase. Call workflow_status for details."
+            result["phase"] = phase
+            result["state"] = "active_workflow"
+            result["action"] = (
+                f"Workflow is in '{phase}' phase. Call workflow_status for details."
+            )
         except engine.WorkflowError:
-            state = "active_workflow"
-            phase = "error"
-            action = "Workflow state file exists but could not be read. Check .workflow/state.json."
-    elif has_build_plan or has_roadmap:
-        state = "legacy_migration"
-        legacy = []
-        if has_build_plan:
-            legacy.append("BUILD_PLAN.md")
-        if has_roadmap:
-            legacy.append("ROADMAP.md")
-        phase = None
-        action = (
-            f"Found legacy artifact(s): {', '.join(legacy)}. "
-            f"Call workflow_init(from_migration=True) to migrate."
-        )
-    elif has_mcp_config or has_agents_rule:
-        state = "setup_no_workflow"
-        phase = None
-        action = "Project is configured but no workflow started. Call workflow_init to begin."
-    else:
-        state = "not_setup"
-        phase = None
-        action = (
-            "No product-delivery config found. Call workflow_setup(dry_run=True) "
-            "to preview setup, then workflow_setup(dry_run=False) to apply."
-        )
+            result["phase"] = "error"
+            result["state"] = "active_workflow"
+            result["action"] = (
+                "Workflow state file exists but could not be read. "
+                "Check .workflow/state.json."
+            )
 
-    _register_project(p, phase)
+    _register_project(p, phase or result.get("phase"))
 
     return json.dumps({
         "project_dir": str(p),
         "project_name": p.name,
-        "state": state,
-        "phase": phase,
-        "action": action,
-        "details": {
-            "has_workflow": has_workflow,
-            "has_mcp_config": has_mcp_config,
-            "has_agents_rule": has_agents_rule,
-            "has_env": has_env,
-            "has_build_plan": has_build_plan,
-            "has_roadmap": has_roadmap,
-        },
+        "path": result["path"],
+        "state": result["state"],
+        "phase": result.get("phase"),
+        "action": result["action"],
+        "next_actions": result["next_actions"],
+        "details": result["details"],
+    }, indent=2)
+
+
+@mcp.tool()
+def workflow_bootstrap(project_dir: str | None = None, dry_run: bool = False) -> str:
+    """Run the detect playbook: setup (if needed) then init/migrate.
+
+    For brand-new, established, or legacy (ROADMAP/BUILD_PLAN) repos.
+    Pass dry_run=True to preview without writing.
+
+    Args:
+        project_dir: Project directory. Defaults to working directory.
+        dry_run: If True, return the playbook without applying setup/init.
+    """
+    from .classify import classify_project
+    from . import setup as setup_mod
+
+    p = _resolve(project_dir)
+    classified = classify_project(p)
+
+    if dry_run:
+        return json.dumps({
+            "project_dir": str(p),
+            "dry_run": True,
+            "path": classified["path"],
+            "next_actions": classified["next_actions"],
+            "message": "Dry run — call again with dry_run=False to apply.",
+        }, indent=2)
+
+    applied = []
+    if classified["path"] == "resume":
+        status = engine.get_status(p)
+        return json.dumps({
+            "project_dir": str(p),
+            "path": "resume",
+            "phase": status.get("phase"),
+            "applied": [],
+            "next_actions": classified["next_actions"],
+            "message": "Workflow already active — resume from status.",
+        }, indent=2)
+
+    needs_setup = classified["state"] == "not_setup"
+    if needs_setup:
+        setup_result = setup_mod.execute_setup(p)
+        applied.append({"step": "setup", "result": setup_result})
+
+    init_args = {}
+    for action in classified["next_actions"]:
+        if action.get("tool") == "workflow_init":
+            init_args = action.get("args") or {}
+            break
+
+    if (p / ".workflow" / "state.json").exists():
+        status = engine.get_status(p)
+        return json.dumps({
+            "project_dir": str(p),
+            "path": classified["path"],
+            "phase": status.get("phase"),
+            "applied": applied,
+            "message": "Setup applied; workflow already existed.",
+            "next_actions": [
+                {"tool": "workflow_status", "args": {}},
+                {"instruction": "Continue from current phase."},
+            ],
+        }, indent=2)
+
+    init_result = engine.init_workflow(
+        p,
+        project_type=init_args.get("project_type"),
+        from_migration=bool(init_args.get("from_migration")),
+    )
+    applied.append({"step": "init", "result": init_result})
+    _register_project(p, init_result.get("phase"))
+
+    remaining = [
+        a for a in classified["next_actions"]
+        if a.get("tool") not in ("workflow_setup", "workflow_init")
+    ]
+
+    return json.dumps({
+        "project_dir": str(p),
+        "path": classified["path"],
+        "phase": init_result.get("phase"),
+        "project_type": init_result.get("project_type"),
+        "migrated_from": init_result.get("migrated_from"),
+        "applied": applied,
+        "next_actions": remaining,
+        "message": "Bootstrap complete. Follow remaining next_actions.",
     }, indent=2)
 
 
@@ -458,22 +540,86 @@ def workflow_item_transition(
     item_id: str,
     target: str,
     reason: str | None = None,
+    force: bool = False,
     project_dir: str | None = None,
 ) -> str:
     """Transition a work item to a new state.
 
-    Valid transitions: ready->implementing, implementing->verifying,
-    verifying->reviewing, verifying->rework, reviewing->accepted,
-    reviewing->rework, rework->implementing. Any item can be cancelled.
+    Guards require evidence for verifying/accepted transitions (test-results).
+    Use workflow_evidence_record / workflow_evidence_test first.
 
     Args:
         item_id: Work item ID (WI-NNN).
         target: Target state.
         reason: Reason for the transition.
+        force: Force past failed guards (logged).
         project_dir: Project directory. Defaults to working directory.
     """
     try:
-        result = engine.transition_item(_resolve(project_dir), item_id, target, reason)
+        result = engine.transition_item(
+            _resolve(project_dir), item_id, target, reason, force=force
+        )
+        return json.dumps(result, indent=2)
+    except engine.GuardFailedError as e:
+        return json.dumps({
+            "error": "GuardFailedError",
+            "message": str(e),
+            "guard_results": e.guard_results,
+        })
+    except engine.WorkflowError as e:
+        return _error_response(e)
+
+
+@mcp.tool()
+def workflow_evidence_record(
+    evidence_type: str,
+    content: str | None = None,
+    path: str | None = None,
+    item_id: str | None = None,
+    project_dir: str | None = None,
+) -> str:
+    """Record structured evidence in the workflow evidence index.
+
+    Types include: brief, synthesis, health-check, maturity-assessment,
+    user-confirmation, plan, test-results, coherence-check, eval-results, artifact.
+
+    Args:
+        evidence_type: Evidence type string.
+        content: Inline text content (written under .workflow/evidence/).
+        path: Path to an existing file to copy into evidence storage.
+        item_id: Optional WI-NNN to link this evidence to.
+        project_dir: Project directory. Defaults to working directory.
+    """
+    try:
+        result = engine.record_evidence(
+            _resolve(project_dir),
+            evidence_type,
+            content=content,
+            path=path,
+            item_id=item_id,
+        )
+        return json.dumps(result, indent=2)
+    except engine.WorkflowError as e:
+        return _error_response(e)
+
+
+@mcp.tool()
+def workflow_evidence_test(
+    command: str = "pytest",
+    item_id: str | None = None,
+    project_dir: str | None = None,
+) -> str:
+    """Run a test command and record test-results evidence.
+
+    Args:
+        command: Shell command to run (default: pytest).
+        item_id: Optional WI-NNN; auto-detected if one item is implementing/verifying.
+        project_dir: Project directory. Defaults to working directory.
+    """
+    try:
+        result = engine.run_and_record_tests(
+            _resolve(project_dir), command, item_id=item_id
+        )
         return json.dumps(result, indent=2)
     except engine.WorkflowError as e:
         return _error_response(e)
@@ -505,17 +651,22 @@ def workflow_item_waive(
 
 
 @mcp.tool()
-def workflow_check(project_dir: str | None = None) -> str:
-    """Run guard checks for all available transitions from the current state.
-
-    Returns which transitions are ready (all guards pass) and which are
-    blocked, with per-guard status.
+def workflow_check(
+    project_dir: str | None = None,
+    ci: bool = False,
+) -> str:
+    """Run guard checks for available transitions, or CI merge gate.
 
     Args:
         project_dir: Project directory. Defaults to working directory.
+        ci: If True, run check_ci (non-zero semantics for merge gates).
     """
     try:
-        result = engine.check_guards(_resolve(project_dir))
+        p = _resolve(project_dir)
+        if ci:
+            result = engine.check_ci(p)
+        else:
+            result = engine.check_guards(p)
         return json.dumps(result, indent=2)
     except engine.WorkflowError as e:
         return _error_response(e)

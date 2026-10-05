@@ -43,6 +43,9 @@ htmlcov/
 # Product-delivery workflow state (local to consuming projects)
 .workflow/
 
+# Local pytest temp
+.pytest-tmp/
+
 # IDE / editors
 .idea/
 .vscode/

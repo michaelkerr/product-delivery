@@ -20,6 +20,11 @@ dependencies = [
     "mcp>=1.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
 product-delivery = "product_delivery.__main__:main"
 
@@ -41,3 +46,7 @@ include = [
     "README.md",
     "pyproject.toml",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

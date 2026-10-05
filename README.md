@@ -6,13 +6,38 @@ A unified lifecycle skill for software products — from first idea through deli
 
 Manages the full product lifecycle through ten states: **intake → discover → frame → plan → deliver → release → stabilize → closed**, plus **blocked** (resumable overlay) and **aborted** (terminal). A nested work-item submachine inside `deliver` tracks individual items through **ready → implementing → verifying → reviewing → accepted**.
 
-Every transition is evidence-gated: guards check that required artifacts exist and conditions are met before allowing a state change. State lives in `.workflow/state.json` with an append-only event log in `.workflow/events.jsonl`.
+Every transition is evidence-gated: guards check that required artifacts and recorded evidence exist before allowing a state change. State lives in `.workflow/state.json` with an append-only event log in `.workflow/events.jsonl`. Cursor hooks capture test runs and block MCP transitions that fail guards.
+
+## Add to a repo
+
+Works for brand-new and established projects:
+
+```bash
+# From the target project
+uvx --from product-delivery product-delivery setup
+# Or in an agent session: workflow_detect → follow next_actions
+# Or one-shot: workflow_bootstrap
+```
+
+| Situation | What happens |
+|---|---|
+| Empty / new repo | Setup (MCP + hooks + AGENTS) → greenfield init → intake |
+| Has `ROADMAP.md` / `BUILD_PLAN.md` | Setup → migrate into work items → resume inferred phase |
+| Established codebase, no legacy plan | Setup → evolution init → health-check discover |
+| Already has `.workflow/` | Resume via `workflow_status` / `workflow_next` |
+
+CI gate for consumers (installed by setup when missing):
+
+```bash
+python scripts/workflow check --ci
+# or: workflow_check(ci=True)
+```
 
 ## Installation
 
 ### MCP Server (recommended)
 
-The MCP server gives any MCP-capable harness identical behavior — 19 tools, 10 resources, and a prompt for loading the skill instructions.
+The MCP server gives any MCP-capable harness identical behavior — tools, resources, and a prompt for loading the skill instructions.
 
 ```bash
 # Install and run via uvx (no clone needed)
@@ -68,7 +93,8 @@ Read `SKILL.md` and follow the instructions. The skill is harness-agnostic — n
 
 | Tool | Purpose |
 |------|---------|
-| `workflow_detect` | Detect project state (not_setup / setup_no_workflow / active / legacy) |
+| `workflow_detect` | Detect project path + next_actions playbook |
+| `workflow_bootstrap` | Apply setup + init/migrate in one step |
 | `workflow_projects` | List all registered projects across directories |
 | `workflow_project_remove` | Remove a project from the registry |
 | `workflow_init` | Initialize a new delivery workflow |
@@ -79,7 +105,9 @@ Read `SKILL.md` and follow the instructions. The skill is harness-agnostic — n
 | `workflow_item_list` | List work items (filterable by state) |
 | `workflow_item_transition` | Transition a work item |
 | `workflow_item_waive` | Waive a work item in review |
-| `workflow_check` | Run guard checks for all transitions |
+| `workflow_evidence_record` | Record structured evidence |
+| `workflow_evidence_test` | Run tests and record test-results evidence |
+| `workflow_check` | Run guard checks (`ci=True` for merge gate) |
 | `workflow_block` | Block the workflow |
 | `workflow_resume` | Resume from blocked |
 | `workflow_waive_guard` | Waive a transition guard |

@@ -48,9 +48,18 @@ Use the MCP server (`product-delivery`) when available — it exposes all workfl
 
 When entering a project:
 
-1. Check for `.workflow/state.json`. If it exists, resume from the current state.
-2. If it does not exist, initialize a new workflow.
-3. If the project has `BUILD_PLAN.md` or `ROADMAP.md` from legacy skills, initialize with migration (see `references/migration.md`).
+1. Call `workflow_detect` first. It returns a typed `path` and ordered `next_actions`.
+2. Execute `next_actions` in order (setup → init/migrate → status), or call `workflow_bootstrap` to apply setup+init in one step.
+3. Load the `product_delivery` prompt for full skill instructions.
+
+Paths:
+
+- **greenfield** — empty / new repo → setup → init(`greenfield`) → intake conversation
+- **legacy_migration** — `BUILD_PLAN.md` / `ROADMAP.md` present → setup → init(`from_migration=True`) → resume inferred phase (do not re-ask greenfield intake)
+- **established_evolution** — codebase without legacy plans → setup → init(`evolution`) → health-check discover
+- **resume** — `.workflow/state.json` exists → status / next only
+
+Never skip setup on a bare repo. Evidence and transitions are machine-checked.
 
 ## States
 

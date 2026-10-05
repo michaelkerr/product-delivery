@@ -38,7 +38,8 @@ class TestDetect:
     def test_not_setup(self, project):
         result = json.loads(server.workflow_detect(str(project)))
         assert result["state"] == "not_setup"
-        assert "workflow_setup" in result["action"]
+        assert result["path"] == "greenfield"
+        assert any(a.get("tool") == "workflow_setup" for a in result["next_actions"])
 
     def test_setup_no_workflow(self, project):
         claude_dir = project / ".claude"
@@ -48,18 +49,23 @@ class TestDetect:
         }))
         result = json.loads(server.workflow_detect(str(project)))
         assert result["state"] == "setup_no_workflow"
+        assert result["path"] == "greenfield"
 
     def test_active_workflow(self, initialized):
         result = json.loads(server.workflow_detect(str(initialized)))
         assert result["state"] == "active_workflow"
+        assert result["path"] == "resume"
         assert result["phase"] == "intake"
 
     def test_legacy_migration(self, project):
         (project / "BUILD_PLAN.md").write_text("# Build Plan\n")
         result = json.loads(server.workflow_detect(str(project)))
-        assert result["state"] == "legacy_migration"
+        assert result["path"] == "legacy_migration"
         assert "BUILD_PLAN.md" in result["action"]
-
+        assert any(
+            a.get("args", {}).get("from_migration") for a in result["next_actions"]
+            if a.get("tool") == "workflow_init"
+        )
 
 # ---------------------------------------------------------------------------
 # Init / Status / Next
@@ -150,8 +156,8 @@ class TestItemTools:
         engine.do_transition(in_plan, "deliver", force=True)
 
         engine.transition_item(in_plan, "WI-001", "implementing")
-        engine.transition_item(in_plan, "WI-001", "verifying")
-        engine.transition_item(in_plan, "WI-001", "reviewing")
+        engine.transition_item(in_plan, "WI-001", "verifying", force=True)
+        engine.transition_item(in_plan, "WI-001", "reviewing", force=True)
 
         result = json.loads(server.workflow_item_waive(
             "WI-001", "admin", "not needed", project_dir=str(in_plan)
